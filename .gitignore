@@ -1,0 +1,24 @@
+# --- Secrets: never commit these ---
+door_counter/secrets.h
+door_counter/data/service_account.json
+# (the *.example templates above are intentionally NOT ignored)
+
+# --- Arduino / build artifacts ---
+build/
+*.bin
+*.elf
+*.map
+*.hex
+*.partitions.bin
+
+# --- Python tooling (scripts/monitor.py venv) ---
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# --- Editor / OS cruft ---
+.vscode/
+.idea/
+.DS_Store
+*.swp
