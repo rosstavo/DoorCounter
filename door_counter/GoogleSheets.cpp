@@ -293,13 +293,15 @@ static String jcell(const char* s) {
   return "\"" + v + "\"";
 }
 
-bool appendDailyRow(const char* date, uint32_t entries, uint32_t exits,
-                    const char* opening, const char* closing, const char* notes,
-                    int* httpCodeOut) {
-  long net = (long)((int32_t)entries - (int32_t)exits);
-  String row = "[" + jcell(date) + "," + String(entries) + "," +
-               String(exits) + "," + String(net) + "," + jcell(opening) + "," +
-               jcell(closing) + "," + jcell(notes) + "]";
+bool appendDailyRow(const char* date, const char* dow, const DayCounters& day,
+                    const char* notes, int* httpCodeOut) {
+  // Column order must match Storage::DAILY_HEADER (and the queued CSV row).
+  String row = "[" + jcell(date) + "," + String(day.entries) + "," +
+               String(day.exits) + "," + String((long)day.net()) + "," +
+               jcell(day.openingTime) + "," + jcell(day.closingTime) + "," +
+               jcell(notes) + "," + jcell(dow) + "," + String(day.amEntries) +
+               "," + String(day.amExits) + "," + String(day.pmEntries) + "," +
+               String(day.pmExits) + "]";
   return appendValues(row, httpCodeOut);
 }
 

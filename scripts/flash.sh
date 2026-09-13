@@ -8,6 +8,8 @@
 #   scripts/flash.sh firmware   # compile + upload the sketch
 #   scripts/flash.sh fs         # build LittleFS from data/ and flash it
 #   scripts/flash.sh all        # fs, then firmware
+#   scripts/flash.sh tuner      # compile + upload the live web tuner (web/README.md)
+#   scripts/flash.sh test       # compile + upload the PIR wiring test
 #
 # Override the port:  PORT=/dev/cu.usbserial-XXXX scripts/flash.sh firmware
 #
@@ -19,6 +21,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SKETCH="$ROOT/door_counter"
+TUNER="$ROOT/tuner"
+HWTEST="$ROOT/hardware_test"
 DATA="$SKETCH/data"
 FQBN="esp32:esp32:esp32"
 BAUD=115200
@@ -46,6 +50,16 @@ flash_firmware() {
   arduino-cli upload -p "$PORT" --fqbn "${FQBN}:UploadSpeed=${BAUD}" "$SKETCH"
 }
 
+# The tuner and hardware-test sketches don't touch the filesystem, so they only
+# ever need the firmware step — and neither disturbs stored counters or logs.
+flash_sketch() {
+  local dir="$1" name="$2"
+  echo ">> compiling $name"
+  arduino-cli compile --fqbn "$FQBN" "$dir"
+  echo ">> uploading $name to $PORT @ ${BAUD}"
+  arduino-cli upload -p "$PORT" --fqbn "${FQBN}:UploadSpeed=${BAUD}" "$dir"
+}
+
 flash_fs() {
   [ -n "$MKLFS" ]   || { echo "mklittlefs not found under $PKG/tools"; exit 1; }
   [ -n "$ESPTOOL" ] || { echo "esptool not found under $PKG/tools"; exit 1; }
@@ -64,6 +78,8 @@ case "${1:-}" in
   firmware) flash_firmware ;;
   fs)       flash_fs ;;
   all)      flash_fs; flash_firmware ;;
-  *) echo "usage: $0 {firmware|fs|all}"; exit 1 ;;
+  tuner)    flash_sketch "$TUNER" "tuner" ;;
+  test)     flash_sketch "$HWTEST" "hardware test" ;;
+  *) echo "usage: $0 {firmware|fs|all|tuner|test}"; exit 1 ;;
 esac
 echo ">> done"

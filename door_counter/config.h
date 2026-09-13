@@ -25,10 +25,20 @@
 #define WARMUP_MS            60000  // Boot warm-up before counting starts
 #define DETECTION_WINDOW_MS    400  // Max gap between sensor triggers for a valid event.
                                      // TUNE THIS during installation: ~1.5x the largest
-                                     // observed walk-through delta (see README).
+                                     // observed walk-through delta. The live web tuner
+                                     // (web/README.md) measures it for you and prints
+                                     // this block ready to paste back.
 #define DEBOUNCE_MS           1000  // Ignore window after a valid event is registered
 #define SIMULTANEOUS_MS         10  // Triggers closer than this = discard (group/glitch)
 #define BUTTON_HOLD_MS        3000  // Hold time for manual reset+push
+
+// ---------------------------------------------------------------------------
+// Reporting
+// ---------------------------------------------------------------------------
+// Each day's count is also split into a morning and an afternoon half. An
+// event at or after this hour (local, 24h clock) counts as PM; earlier events
+// count as AM. Set to the hour that best splits the shop's trading day.
+#define PM_START_HOUR 13
 
 // ---------------------------------------------------------------------------
 // Daily reset / push time (24hr local time)
@@ -49,6 +59,13 @@
 // ---------------------------------------------------------------------------
 #define WIFI_RETRY_INTERVAL_MS 30000  // Re-attempt connection every 30s, indefinitely
 #define WIFI_CONNECT_TIMEOUT_MS 15000 // Per-attempt timeout
+
+// ---------------------------------------------------------------------------
+// Status web page (read-only; open http://door-counter.local/ on the same LAN)
+// ---------------------------------------------------------------------------
+#define STATUS_HOSTNAME    "door-counter"  // mDNS name and the name shown in the router
+#define STATUS_HTTP_PORT   80
+#define STATUS_REFRESH_S   10              // Page reloads itself this often
 
 // ---------------------------------------------------------------------------
 // Storage / logging

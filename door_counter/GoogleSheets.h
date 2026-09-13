@@ -15,6 +15,7 @@
 #define GOOGLE_SHEETS_H
 
 #include <Arduino.h>
+#include "Types.h"
 
 namespace GoogleSheets {
 
@@ -25,11 +26,11 @@ bool begin();
 // True if a usable service account was loaded.
 bool isConfigured();
 
-// Append one daily row to the sheet. Returns true on HTTP 200.
-// `httpCodeOut` (optional) receives the HTTP status (or a negative client error).
-bool appendDailyRow(const char* date, uint32_t entries, uint32_t exits,
-                    const char* opening, const char* closing, const char* notes,
-                    int* httpCodeOut = nullptr);
+// Append one daily row to the sheet. Column order matches Storage::DAILY_HEADER.
+// Returns true on HTTP 200. `httpCodeOut` (optional) receives the HTTP status
+// (or a negative client error).
+bool appendDailyRow(const char* date, const char* dow, const DayCounters& day,
+                    const char* notes, int* httpCodeOut = nullptr);
 
 // Append a row whose cells are an already-CSV-encoded line (used to replay the
 // offline retry queue). Returns true on HTTP 200.

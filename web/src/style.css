@@ -1,0 +1,165 @@
+/* style.css — deliberately plain: this is a bench instrument, and it has to be
+   readable from a couple of metres away on a phone while you walk a doorway. */
+
+:root {
+  --bg: #0d1117;
+  --panel: #151a21;
+  --panel-2: #1b212a;
+  --line: #262c35;
+  --text: #c9d1d9;
+  --muted: #8a8f98;
+  --outer: #4cc2ff;
+  --inner: #ffcc4c;
+  --entry: #3ddc84;
+  --exit: #7aa2ff;
+  --noise: #8a8f98;
+  --simul: #ff8a5b;
+  --warn: #ffb84c;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+h1 { font-size: 15px; margin: 0; font-weight: 600; }
+h2 { font-size: 13px; margin: 0; font-weight: 600; letter-spacing: .02em; }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+.bar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 10px 16px;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; z-index: 2;
+}
+.bar-right { display: flex; align-items: center; gap: 12px; }
+
+.pill {
+  font: 12px/1 ui-monospace, Menlo, monospace;
+  padding: 5px 10px; border-radius: 999px; white-space: nowrap;
+}
+.pill-on  { background: #10331f; color: var(--entry); }
+.pill-off { background: #3a1f1f; color: #ff9b8a; }
+
+main { padding: 12px; display: flex; flex-direction: column; gap: 12px;
+       max-width: 1100px; margin: 0 auto; }
+
+.panel {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 12px;
+}
+.panel-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 10px;
+}
+.muted { color: var(--muted); font-size: 12px; }
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+/* --- live lamps --- */
+.lamps { display: grid; grid-template-columns: 1fr 1fr 1.4fr; gap: 12px; }
+.lamp {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 6px; padding: 10px 12px;
+}
+.lamp-dot {
+  width: 14px; height: 14px; border-radius: 50%;
+  background: #2a3038; flex: none; transition: background .05s;
+}
+#lampOuter.on .lamp-dot { background: var(--outer); box-shadow: 0 0 12px var(--outer); }
+#lampInner.on .lamp-dot { background: var(--inner); box-shadow: 0 0 12px var(--inner); }
+.lamp-name { font-size: 12px; font-weight: 600; letter-spacing: .04em; }
+.lamp-name em { display: block; font-style: normal; font-weight: 400;
+                color: var(--muted); font-size: 11px; letter-spacing: 0; }
+.lamp-val { margin-left: auto; font: 13px ui-monospace, Menlo, monospace; }
+.lamp-val.big { font-size: 16px; }
+.lamp.armed    { border-color: var(--warn); }
+.lamp.armed    .lamp-val { color: var(--warn); }
+.lamp.debounce .lamp-val { color: var(--simul); }
+.lamp.warm     .lamp-val { color: var(--inner); }
+.lamp.idle     .lamp-val { color: var(--muted); }
+
+/* --- canvases --- */
+canvas { width: 100%; display: block; background: #0b0f14;
+         border: 1px solid var(--line); border-radius: 6px; }
+
+.legend { display: flex; gap: 16px; flex-wrap: wrap;
+          margin: 8px 0 0; font-size: 12px; color: var(--muted); }
+.key { display: inline-block; width: 10px; height: 10px;
+       border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.key-entry { background: var(--entry); }
+.key-exit  { background: var(--exit); }
+.key-noise { background: var(--noise); }
+.key-simul { background: var(--simul); }
+
+/* --- settings --- */
+.setting { margin-bottom: 14px; }
+.setting > label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+.setting label em { display: block; font-style: normal; font-weight: 400;
+                    color: var(--muted); font-size: 11px; }
+.row { display: flex; align-items: center; gap: 10px; }
+.row input[type="range"] { flex: 1; accent-color: var(--outer); }
+.row output { font: 13px ui-monospace, Menlo, monospace;
+              min-width: 74px; text-align: right; }
+
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+button.ghost {
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 6px 12px; font-size: 12px; cursor: pointer;
+}
+button.ghost:hover:not(:disabled) { border-color: var(--outer); color: #fff; }
+button.ghost:disabled { opacity: .45; cursor: default; }
+button.ghost.active { border-color: var(--warn); color: var(--warn); }
+
+select { background: var(--panel-2); color: var(--text);
+         border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; }
+.controls { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
+
+/* --- counters --- */
+.counters { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.counter {
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 6px; padding: 10px; text-align: center;
+}
+.counter span { display: block; font: 600 26px ui-monospace, Menlo, monospace; }
+.counter em { font-style: normal; font-size: 11px; color: var(--muted); }
+.c-entry span { color: var(--entry); }
+.c-exit  span { color: var(--exit); }
+.c-noise span { color: var(--noise); }
+.c-simul span { color: var(--simul); }
+
+.hint { font-size: 12px; color: var(--muted); margin: 10px 0 0; }
+.hint.warn { color: var(--warn); }
+
+pre#snippet {
+  margin: 0; padding: 10px; background: #0b0f14; border: 1px solid var(--line);
+  border-radius: 6px; font-size: 12px; overflow-x: auto; color: var(--text);
+}
+
+/* --- log --- */
+.log {
+  height: 180px; overflow-y: auto; background: #0b0f14;
+  border: 1px solid var(--line); border-radius: 6px; padding: 8px;
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.log-row { white-space: pre-wrap; }
+.log-entry { color: var(--entry); }
+.log-exit  { color: var(--exit); }
+.log-noise { color: var(--noise); }
+.log-simul { color: var(--simul); }
+.log-info  { color: var(--text); }
+.log-raw   { color: var(--muted); }
+
+@media (max-width: 760px) {
+  .cols { grid-template-columns: 1fr; }
+  .lamps { grid-template-columns: 1fr 1fr; }
+  .lamps .wide { grid-column: 1 / -1; }
+  .counters { grid-template-columns: 1fr 1fr; }
+}

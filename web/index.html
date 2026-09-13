@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Footfall Counter — Live Tuner</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <h1>Footfall Counter — Live Tuner</h1>
+      <div class="bar-right">
+        <span id="uptime" class="muted"></span>
+        <span id="bridge" class="pill pill-off">connecting…</span>
+      </div>
+    </header>
+
+    <main>
+      <!-- Live state ------------------------------------------------------->
+      <section class="panel lamps">
+        <div class="lamp" id="lampOuter">
+          <span class="lamp-dot"></span>
+          <span class="lamp-name">OUTER <em>GPIO16 · street</em></span>
+          <span class="lamp-val" id="outerVal">LOW</span>
+        </div>
+        <div class="lamp" id="lampInner">
+          <span class="lamp-dot"></span>
+          <span class="lamp-name">INNER <em>GPIO17 · shop</em></span>
+          <span class="lamp-val" id="innerVal">LOW</span>
+        </div>
+        <div class="lamp wide" id="lampState">
+          <span class="lamp-name">STATE</span>
+          <span class="lamp-val big" id="stateVal">—</span>
+        </div>
+      </section>
+
+      <!-- Scope ------------------------------------------------------------>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Live sensor trace</h2>
+          <div class="controls">
+            <label>Span
+              <select id="span">
+                <option value="4000">4 s</option>
+                <option value="8000" selected>8 s</option>
+                <option value="20000">20 s</option>
+                <option value="60000">60 s</option>
+              </select>
+            </label>
+            <button id="freeze" class="ghost">Freeze</button>
+          </div>
+        </div>
+        <canvas id="scope" height="220"></canvas>
+        <p class="legend">
+          <span class="key key-entry"></span> entry
+          <span class="key key-exit"></span> exit
+          <span class="key key-noise"></span> discarded (no follow-up)
+          <span class="key key-simul"></span> discarded (simultaneous)
+        </p>
+      </section>
+
+      <div class="cols">
+        <!-- Settings ------------------------------------------------------->
+        <section class="panel">
+          <div class="panel-head"><h2>Settings</h2><span class="muted">applied to the device instantly</span></div>
+
+          <div class="setting">
+            <label for="window">Detection window
+              <em>max gap between the two triggers</em>
+            </label>
+            <div class="row">
+              <input type="range" id="window" min="50" max="2000" step="10" value="400" />
+              <output id="windowOut">400 ms</output>
+            </div>
+          </div>
+
+          <div class="setting">
+            <label for="debounce">Debounce
+              <em>lock-out after a counted event</em>
+            </label>
+            <div class="row">
+              <input type="range" id="debounce" min="0" max="5000" step="50" value="1000" />
+              <output id="debounceOut">1000 ms</output>
+            </div>
+          </div>
+
+          <div class="setting">
+            <label for="simultaneous">Simultaneous threshold
+              <em>closer than this = glitch, not a person</em>
+            </label>
+            <div class="row">
+              <input type="range" id="simultaneous" min="0" max="200" step="1" value="10" />
+              <output id="simultaneousOut">10 ms</output>
+            </div>
+          </div>
+
+          <div class="setting">
+            <label for="warmup">Warm-up
+              <em>tuner only — production uses 60 s</em>
+            </label>
+            <div class="row">
+              <input type="range" id="warmup" min="0" max="60000" step="1000" value="5000" />
+              <output id="warmupOut">5000 ms</output>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button id="widen" class="ghost">Widen to sample (1500 ms)</button>
+            <button id="applySuggested" class="ghost" disabled>Apply suggested window</button>
+          </div>
+        </section>
+
+        <!-- Counters ------------------------------------------------------->
+        <section class="panel">
+          <div class="panel-head"><h2>Counters</h2><button id="reset" class="ghost">Reset</button></div>
+          <div class="counters">
+            <div class="counter c-entry"><span id="nEntry">0</span><em>entries</em></div>
+            <div class="counter c-exit"><span id="nExit">0</span><em>exits</em></div>
+            <div class="counter c-noise"><span id="nNoise">0</span><em>discarded noise</em></div>
+            <div class="counter c-simul"><span id="nSimul">0</span><em>discarded simul.</em></div>
+          </div>
+          <p class="hint" id="noiseHint"></p>
+        </section>
+      </div>
+
+      <!-- Deltas ----------------------------------------------------------->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Walk-through deltas</h2>
+          <span class="muted" id="deltaStats">no counted events yet</span>
+        </div>
+        <canvas id="deltas" height="130"></canvas>
+        <p class="hint" id="suggestHint">
+          Tip: widen the window first, walk through a dozen times, then narrow it.
+          A window that is already too narrow hides the very deltas you need to see —
+          those walk-throughs land in “discarded noise” instead.
+        </p>
+      </section>
+
+      <!-- Output ----------------------------------------------------------->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Paste into <code>door_counter/config.h</code></h2>
+          <button id="copy" class="ghost">Copy</button>
+        </div>
+        <pre id="snippet"></pre>
+      </section>
+
+      <!-- Log -------------------------------------------------------------->
+      <section class="panel">
+        <div class="panel-head"><h2>Event log</h2><button id="clearLog" class="ghost">Clear</button></div>
+        <div id="log" class="log"></div>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

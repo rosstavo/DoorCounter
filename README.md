@@ -22,14 +22,26 @@ door-counter/
 │   ├── secrets.h.example         #   template for the above
 │   ├── Types.h                   #   shared structs
 │   ├── Storage.h / .cpp          #   LittleFS CSV logs, state, retry queue
+│   ├── Detector.h                #   the detection state machine (shared, see below)
 │   ├── GoogleSheets.h / .cpp     #   service-account JWT + Sheets v4 append
 │   └── data/                     #   files flashed to the device filesystem
 │       ├── service_account.json          (git-ignored — your real key)
 │       └── service_account.json.example  (template)
 ├── hardware_test/
 │   └── hardware_test.ino         # Minimal sensor-wiring test (flash this FIRST)
+├── tuner/
+│   └── tuner.ino                 # Tuning firmware: streams sensor JSON, timings
+│                                 #   adjustable at runtime from the browser
+├── web/                          # Live web tuner (Vite + serial bridge)
+├── test/                         # Host-side tests — no board needed
 └── README.md
 ```
+
+`door_counter/Detector.h` holds the detection state machine on its own, and both
+`door_counter.ino` and `tuner/tuner.ino` compile the same file. That is what
+makes the tuner trustworthy: the constants you dial in are dialled in against
+the code that ships. Change the state machine there and both stay in step;
+`test/run.sh` guards its behaviour.
 
 ---
 
@@ -97,7 +109,7 @@ Sheet ID (the long string in the sheet URL between `/d/` and `/edit`).
    (e.g. `footfall-counter@your-project.iam.gserviceaccount.com`) as an Editor.
 4. Make sure the first tab is named `Sheet1` (or change `GSHEET_RANGE` in
    `config.h`). Optionally add a header row:
-   `Date | Total Entries | Total Exits | Net | Opening Time | Closing Time | Notes`
+   `Date | Total Entries | Total Exits | Net | Opening Time | Closing Time | Notes | Day | AM Entries | AM Exits | PM Entries | PM Exits`
 
 ### 4. Upload the filesystem (LittleFS)
 
@@ -132,12 +144,47 @@ unverified path (useful while debugging connectivity).
 
 `DETECTION_WINDOW_MS` (default **400 ms**, in `config.h`) is the maximum gap
 between the two sensor triggers for a valid event, and depends on your physical
-sensor spacing and walking pace. To tune:
+sensor spacing and walking pace. Getting it right by editing a constant,
+reflashing and squinting at a serial log is slow and miserable, so there is a
+live web tuner for exactly this.
+
+### With the web tuner (recommended)
+
+```sh
+scripts/flash.sh tuner       # tuning firmware
+cd web && npm install && npm run dev
+```
+
+Open the **Network** URL on your phone and walk the doorway while watching the
+sensor traces; drag the timings and the very next walk-through reflects them.
+When it's right, copy the generated `config.h` block, paste it in, and
+`scripts/flash.sh firmware` to put the real firmware back. Full instructions,
+including the method that avoids the "narrow window hides its own evidence"
+trap, are in **[web/README.md](web/README.md)**.
+
+### By hand, from the serial log
 
 1. Serial output is verbose by default — every valid sequence prints its
    `delta` (e.g. `Valid sequence OUTER->INNER (delta 180ms)`).
 2. Walk through at normal pace several times; note the largest delta.
 3. Set `DETECTION_WINDOW_MS` ≈ **1.5×** the largest observed delta.
+
+Note that a window which is already too narrow reports those walk-throughs as
+`DISCARDED_NOISE` rather than printing their delta, so widen it generously
+before you start sampling.
+
+---
+
+## Tests
+
+```sh
+test/run.sh
+```
+
+Runs on the Mac with no board attached: the shared detection state machine is
+compiled for the host and driven through entry, exit, noise, simultaneous and
+debounce scenarios, and every JSON line `tuner.ino` emits is checked to parse.
+Needs a C++ compiler and Node.
 
 ---
 
@@ -152,10 +199,16 @@ sensor spacing and walking pace. To tune:
 - **Persistence:** every event and the running day total are written to flash
   (`/today.json`, `/events.csv`), so a power cut doesn't lose the day's count.
   Daily summaries go to `/daily.csv`.
+- **AM/PM split:** each day's totals are also split into a morning and an
+  afternoon half at `PM_START_HOUR` (13:00), and the row is tagged with
+  its day name (`Mon`…`Sun`). See *Reading the numbers* below.
 - **Daily push:** at `DAILY_RESET_HOUR:MINUTE` (default 22:00) — or on a 3 s
   button hold — the day's summary is appended to Google Sheets and counters
   reset. If Wi-Fi/Sheets is down, the row is queued to `/gsheet_queue.csv` and
   replayed automatically when connectivity returns.
+- **Status page:** open `http://door-counter.local/` (or the device's IP) from
+  any browser on the same network. Read-only: today's counts, sensor and Wi-Fi
+  health, clock, and the last Sheets push. Reloads every 10 s.
 - **Watchdog:** the hardware task watchdog reboots the device within ~30 s if
   the main loop hangs.
 - **Health:** if a sensor never fires within 10 min after warm-up, a wiring
@@ -173,12 +226,45 @@ sensor spacing and walking pace. To tune:
 Event logs are size-capped (≈90 days) and rotated automatically. If flash runs
 low, event logging stops but daily summaries keep writing.
 
+`/daily.csv` columns (same order as the Google Sheet and the retry queue):
+
+```
+date,total_entries,total_exits,net,opening_time,closing_time,notes,
+dow,am_entries,am_exits,pm_entries,pm_exits
+```
+
+The last five columns were added later, so they sit on the right — rows already
+in the Sheet keep their meaning. A device upgraded from an older build rewrites
+the `/daily.csv` header on first boot and keeps its old rows, which simply stop
+after `notes`.
+
+---
+
+## Reading the numbers
+
+**The daily total is a trend, not a headcount.** A PIR needs time to settle
+after it fires, so two people crossing the threshold nose-to-tail are seen as
+one. That is the sensor, not the firmware, and no tuning removes it. The count
+therefore reads low, and it reads low in roughly the same way every day — which
+is what makes it useful.
+
+Use it by **comparing like with like**:
+
+- Compare a day against the **median** of the same kind of day (weekday /
+  Saturday / Sunday), not against an absolute target. The median ignores the
+  odd freak day, which a mean does not.
+- Compare **AM vs PM** on the same day to see which half of the day carries the
+  trade.
+- Collect **a few weeks** before drawing conclusions. Group the rows by the
+  `dow` column, take the median of each group, then read new days against it.
+
 ---
 
 ## Acceptance checklist (from the PRD)
 
 - [ ] Walking through either way logs ENTRY/EXIT correctly on serial.
-- [ ] 10 walk-throughs in one direction = exactly 10 events.
+- [ ] 10 walk-throughs in one direction, each left to complete = 10 events.
+      (Back-to-back walkers undercount; see *Reading the numbers*.)
 - [ ] Standing still in the doorway for 5 s logs nothing.
 - [ ] Power-cycle preserves the current day's count.
 - [ ] At the reset time, a correct row appears in the Google Sheet.

@@ -25,6 +25,8 @@ python3 -m venv .venv && .venv/bin/pip install pyserial
 scripts/flash.sh firmware   # compile + upload the sketch
 scripts/flash.sh fs         # build LittleFS from data/ and flash it
 scripts/flash.sh all        # fs, then firmware
+scripts/flash.sh tuner      # live web tuner firmware (see web/README.md)
+scripts/flash.sh test       # PIR wiring test sketch
 ```
 
 - Pinned to **115200 baud** — this board drops the chip mid-write at the default
@@ -54,4 +56,7 @@ Auto-detects the port; `--port` to override, `--baud` defaults to 115200.
 - `arduino-cli monitor` tends not to hold the port here — use `monitor.py`.
 - PIR HC-SR501 **time-delay pot to minimum**, and tune `DETECTION_WINDOW_MS`
   ([door_counter/config.h](../door_counter/config.h)) from real walk-through
-  deltas shown in the serial log.
+  deltas. The live web tuner ([web/README.md](../web/README.md)) plots those
+  deltas for you and is much faster than reading them out of the serial log.
+- `monitor.py` and the web tuner both want the serial port, and only one can
+  hold it. Stop one before starting the other.

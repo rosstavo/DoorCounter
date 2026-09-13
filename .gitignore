@@ -11,6 +11,10 @@ build/
 *.hex
 *.partitions.bin
 
+# --- Web tuner (web/) ---
+node_modules/
+web/dist/
+
 # --- Python tooling (scripts/monitor.py venv) ---
 .venv/
 venv/

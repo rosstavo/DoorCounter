@@ -32,10 +32,14 @@ bool hasRoomForEvents();
 // millis-based fallback string.
 void logEvent(const char* nowTs, EventType type, const DayCounters& day);
 
-// Append one fully-formed daily summary row to /daily.csv.
-void logDaily(const char* dateStr, uint32_t entries, uint32_t exits,
-              const char* openingTime, const char* closingTime,
+// Append one fully-formed daily summary row to /daily.csv. `dow` is the
+// three-letter day name ("Mon".."Sun") the row belongs to.
+void logDaily(const char* dateStr, const char* dow, const DayCounters& day,
               const char* notes);
+
+// The /daily.csv column order, also used for the Google Sheet and the retry
+// queue. Exposed so all three stay in step.
+extern const char* DAILY_HEADER;
 
 // Append a free-form line to the event log (boot events, warnings). Best-effort.
 void logNote(const char* nowTs, const char* note);

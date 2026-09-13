@@ -18,26 +18,25 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
 #include <time.h>
 #include "esp_task_wdt.h"
 
 #include "config.h"
 #include "secrets.h"
 #include "Types.h"
+#include "Detector.h"
 #include "Storage.h"
 #include "GoogleSheets.h"
 
 // ---------------------------------------------------------------------------
 // Detection state machine
 // ---------------------------------------------------------------------------
-enum DetState { IDLE, ARMED };
-static DetState  s_state = IDLE;
-static uint8_t   s_armedSensor = 0;   // PIR_OUTER_PIN or PIR_INNER_PIN
-static uint32_t  s_armedAtMs = 0;
-static uint32_t  s_debounceUntilMs = 0;
-
-static int s_prevOuter = LOW;
-static int s_prevInner = LOW;
+// The logic itself lives in Detector.h, shared verbatim with tuner/tuner.ino
+// so the web tuner dials in the same state machine that ships here. Its
+// timings are loaded from config.h in setup().
+static Detect::Detector s_det;
 
 // ---------------------------------------------------------------------------
 // Runtime state
@@ -56,9 +55,7 @@ static uint32_t s_lastQueueFlushMs = 0;
 // Daily-reset bookkeeping: the date string we already pushed-and-reset for.
 static char s_lastResetDate[11] = "";
 
-// Sensor health
-static bool     s_outerEverFired = false;
-static bool     s_innerEverFired = false;
+// Sensor health (whether each PIR has ever fired is tracked by s_det)
 static uint32_t s_lastHealthWarnMs = 0;
 
 // Button
@@ -68,6 +65,12 @@ static bool     s_btnHandled = false;
 // GPIO34 is input-only (no internal pull-up); if it floats / reads "pressed" at
 // boot we must not fire a push until the button has been seen released once.
 static bool     s_btnReleasedOnce = false;
+
+// Status web page
+static WebServer s_http(STATUS_HTTP_PORT);
+static bool     s_mdnsStarted = false;
+static char     s_lastEvent[40] = "";  // e.g. "Entry at 2026-09-13 10:32:05"
+static char     s_lastPush[80] = "";   // outcome of the most recent Sheets push
 
 // ---------------------------------------------------------------------------
 // Time helpers
@@ -110,6 +113,36 @@ static void nowClock(char* buf, size_t len) {
   }
 }
 
+// True if the clock says we are in the afternoon half of the day. With no
+// synced clock we cannot place an event, so it falls into the AM half.
+static bool nowIsPm() {
+  struct tm tmv;
+  if (!getLocalTimeStruct(tmv)) return false;
+  return tmv.tm_hour >= PM_START_HOUR;
+}
+
+// Three-letter day name for an ISO "YYYY-MM-DD" date. Derived from the date
+// itself, not from "now", so a push that lands after midnight still labels the
+// day it is reporting on. Empty string if the date is not a real one.
+static void dayOfWeek(const char* isoDate, char* out, size_t len) {
+  int y = 0, m = 0, d = 0;
+  if (sscanf(isoDate, "%d-%d-%d", &y, &m, &d) != 3 || y < 1970) {
+    if (len) out[0] = '\0';
+    return;
+  }
+  // days_from_civil: days since 1970-01-01, which was a Thursday.
+  y -= (m <= 2);
+  int era = y / 400;
+  unsigned yoe = (unsigned)(y - era * 400);
+  unsigned doy = (153u * (unsigned)(m + (m > 2 ? -3 : 9)) + 2u) / 5u + (unsigned)d - 1u;
+  unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+  long days = (long)era * 146097L + (long)doe - 719468L;
+  int wd = (int)((days % 7 + 10) % 7);  // 0 = Monday
+  static const char* kNames[7] = {"Mon", "Tue", "Wed", "Thu",
+                                  "Fri", "Sat", "Sun"};
+  snprintf(out, len, "%s", kNames[wd]);
+}
+
 // Timestamped serial line.
 static void slog(const char* fmt, ...) {
   char ts[24];
@@ -145,31 +178,44 @@ static void pushAndResetDay(const char* reason) {
   char notes[64];
   snprintf(notes, sizeof(notes), "%s", reason);
 
-  slog("DAILY PUSH (%s): %s entries=%u exits=%u net=%ld open=%s close=%s",
-       reason, date, g_day.entries, g_day.exits, (long)g_day.net(),
+  char dow[4];
+  dayOfWeek(date, dow, sizeof(dow));
+
+  slog("DAILY PUSH (%s): %s %s entries=%u exits=%u net=%ld open=%s close=%s",
+       reason, date, dow, g_day.entries, g_day.exits, (long)g_day.net(),
        g_day.openingTime, g_day.closingTime);
+  slog("  AM entries=%u exits=%u | PM entries=%u exits=%u", g_day.amEntries,
+       g_day.amExits, g_day.pmEntries, g_day.pmExits);
 
   // 1) Permanent local record (always).
-  Storage::logDaily(date, g_day.entries, g_day.exits, g_day.openingTime,
-                    g_day.closingTime, notes);
+  Storage::logDaily(date, dow, g_day, notes);
 
   // 2) Google Sheets (or queue for retry).
   bool pushed = false;
+  char ts[24];
+  nowTimestamp(ts, sizeof(ts));
   if (GoogleSheets::isConfigured() && WiFi.status() == WL_CONNECTED) {
     int code = 0;
-    pushed = GoogleSheets::appendDailyRow(date, g_day.entries, g_day.exits,
-                                          g_day.openingTime, g_day.closingTime,
-                                          notes, &code);
-    if (!pushed) slog("Google Sheets push failed (HTTP %d) — queuing", code);
+    pushed = GoogleSheets::appendDailyRow(date, dow, g_day, notes, &code);
+    if (pushed) {
+      snprintf(s_lastPush, sizeof(s_lastPush), "Sent OK at %s", ts);
+    } else {
+      slog("Google Sheets push failed (HTTP %d) — queuing", code);
+      snprintf(s_lastPush, sizeof(s_lastPush),
+               "Failed (HTTP %d) at %s — will retry", code, ts);
+    }
   } else {
     slog("Wi-Fi/Sheets unavailable — queuing daily push");
+    snprintf(s_lastPush, sizeof(s_lastPush),
+             "No Wi-Fi/Sheets at %s — will retry", ts);
   }
   if (!pushed) {
-    // Queue a CSV row matching the sheet column order.
-    char row[160];
-    snprintf(row, sizeof(row), "%s,%u,%u,%ld,%s,%s,%s", date, g_day.entries,
-             g_day.exits, (long)g_day.net(), g_day.openingTime,
-             g_day.closingTime, notes);
+    // Queue a CSV row matching the sheet column order (Storage::DAILY_HEADER).
+    char row[200];
+    snprintf(row, sizeof(row), "%s,%u,%u,%ld,%s,%s,%s,%s,%u,%u,%u,%u", date,
+             g_day.entries, g_day.exits, (long)g_day.net(), g_day.openingTime,
+             g_day.closingTime, notes, dow, g_day.amEntries, g_day.amExits,
+             g_day.pmEntries, g_day.pmExits);
     Storage::queuePush(row);
   }
 
@@ -189,22 +235,29 @@ static void registerEvent(EventType type) {
   char clk[9];
   nowClock(clk, sizeof(clk));
 
+  bool pm = nowIsPm();
+
   if (type == EVENT_ENTRY) {
     g_day.entries++;
+    if (pm) g_day.pmEntries++; else g_day.amEntries++;
     if (g_day.openingTime[0] == '\0' && clk[0] != '\0')
       strncpy(g_day.openingTime, clk, sizeof(g_day.openingTime) - 1);
   } else {
     g_day.exits++;
+    if (pm) g_day.pmExits++; else g_day.amExits++;
     if (clk[0] != '\0')
       strncpy(g_day.closingTime, clk, sizeof(g_day.closingTime) - 1);
   }
 
+  snprintf(s_lastEvent, sizeof(s_lastEvent), "%s at %s",
+           type == EVENT_ENTRY ? "Entry" : "Exit", ts);
+
   Storage::logEvent(ts, type, g_day);
   Storage::saveDay(g_day);
 
-  slog("%s registered. entries=%u exits=%u net=%ld",
-       type == EVENT_ENTRY ? "ENTRY" : "EXIT", g_day.entries, g_day.exits,
-       (long)g_day.net());
+  slog("%s registered (%s). entries=%u exits=%u net=%ld",
+       type == EVENT_ENTRY ? "ENTRY" : "EXIT", pm ? "PM" : "AM", g_day.entries,
+       g_day.exits, (long)g_day.net());
 }
 
 // ---------------------------------------------------------------------------
@@ -212,65 +265,32 @@ static void registerEvent(EventType type) {
 // ---------------------------------------------------------------------------
 
 static void serviceSensors() {
-  uint32_t now = millis();
-  int outer = digitalRead(PIR_OUTER_PIN);
-  int inner = digitalRead(PIR_INNER_PIN);
-  bool outerRise = (outer == HIGH && s_prevOuter == LOW);
-  bool innerRise = (inner == HIGH && s_prevInner == LOW);
-  s_prevOuter = outer;
-  s_prevInner = inner;
+  Detect::Outcome o =
+      s_det.update(millis(), digitalRead(PIR_OUTER_PIN), digitalRead(PIR_INNER_PIN));
 
-  if (outerRise) s_outerEverFired = true;
-  if (innerRise) s_innerEverFired = true;
-
-  // Debounce window after a registered event: swallow edges.
-  if (now < s_debounceUntilMs) return;
-
-  switch (s_state) {
-    case IDLE:
-      if (outerRise && innerRise) {
+  switch (o.result) {
+    case Detect::ENTRY:
+      slog("Valid sequence OUTER->INNER (delta %lums)", (unsigned long)o.deltaMs);
+      registerEvent(EVENT_ENTRY);
+      break;
+    case Detect::EXIT:
+      slog("Valid sequence INNER->OUTER (delta %lums)", (unsigned long)o.deltaMs);
+      registerEvent(EVENT_EXIT);
+      break;
+    case Detect::DISCARDED_NOISE:
+      slog("DISCARDED_NOISE (single %s trigger, no follow-up)",
+           o.firstWasOuter ? "OUTER" : "INNER");
+      break;
+    case Detect::DISCARDED_SIMULTANEOUS:
+      if (o.deltaMs == 0) {
         slog("DISCARDED_SIMULTANEOUS (both sensors fired together)");
-        s_debounceUntilMs = now + DEBOUNCE_MS;
-      } else if (outerRise) {
-        s_state = ARMED;
-        s_armedSensor = PIR_OUTER_PIN;
-        s_armedAtMs = now;
-      } else if (innerRise) {
-        s_state = ARMED;
-        s_armedSensor = PIR_INNER_PIN;
-        s_armedAtMs = now;
+      } else {
+        slog("DISCARDED_SIMULTANEOUS (delta %lums < %lums)",
+             (unsigned long)o.deltaMs, (unsigned long)s_det.cfg.simultaneousMs);
       }
       break;
-
-    case ARMED: {
-      uint32_t elapsed = now - s_armedAtMs;
-      if (elapsed > DETECTION_WINDOW_MS) {
-        // No follow-up — single-sensor noise.
-        slog("DISCARDED_NOISE (single %s trigger, no follow-up)",
-             s_armedSensor == PIR_OUTER_PIN ? "OUTER" : "INNER");
-        s_state = IDLE;
-        break;
-      }
-      bool otherRise =
-          (s_armedSensor == PIR_OUTER_PIN) ? innerRise : outerRise;
-      if (otherRise) {
-        if (elapsed < SIMULTANEOUS_MS) {
-          slog("DISCARDED_SIMULTANEOUS (delta %lums < %dms)",
-               (unsigned long)elapsed, SIMULTANEOUS_MS);
-        } else if (s_armedSensor == PIR_OUTER_PIN) {
-          slog("Valid sequence OUTER->INNER (delta %lums)",
-               (unsigned long)elapsed);
-          registerEvent(EVENT_ENTRY);
-        } else {
-          slog("Valid sequence INNER->OUTER (delta %lums)",
-               (unsigned long)elapsed);
-          registerEvent(EVENT_EXIT);
-        }
-        s_state = IDLE;
-        s_debounceUntilMs = now + DEBOUNCE_MS;
-      }
+    case Detect::NONE:
       break;
-    }
   }
 }
 
@@ -286,6 +306,12 @@ static void onWifiConnected() {
     s_ntpStarted = true;
     slog("NTP sync requested");
   }
+  if (!s_mdnsStarted && MDNS.begin(STATUS_HOSTNAME)) {
+    MDNS.addService("http", "tcp", STATUS_HTTP_PORT);
+    s_mdnsStarted = true;
+  }
+  slog("Status page: http://%s.local/ or http://%s/", STATUS_HOSTNAME,
+       WiFi.localIP().toString().c_str());
 }
 
 // Saved networks, tried in order (e.g. home, then shop). The primary is always
@@ -343,8 +369,9 @@ static void maintainClock() {
       // First valid clock since boot.
       if (g_day.date[0] && strcmp(g_day.date, todayStr) == 0) {
         g_day.valid = true;  // restored counters belong to today
-        slog("Restored today's counters: entries=%u exits=%u", g_day.entries,
-             g_day.exits);
+        slog("Restored today's counters: entries=%u exits=%u (AM %u/%u, PM %u/%u)",
+             g_day.entries, g_day.exits, g_day.amEntries, g_day.amExits,
+             g_day.pmEntries, g_day.pmExits);
       } else if (g_day.date[0] && g_day.date[0] != '0') {
         slog("Saved counters are from %s, not today (%s) — starting fresh",
              g_day.date, todayStr);
@@ -381,6 +408,10 @@ static void maintainQueue() {
       int code = 0;
       if (!GoogleSheets::appendCsvRow(line, &code)) {
         slog("Queued row failed (HTTP %d) — will retry later", code);
+        char ts[24];
+        nowTimestamp(ts, sizeof(ts));
+        snprintf(s_lastPush, sizeof(s_lastPush),
+                 "Retry failed (HTTP %d) at %s — will retry", code, ts);
         allOk = false;
         break;
       }
@@ -391,7 +422,104 @@ static void maintainQueue() {
   if (allOk) {
     Storage::clearQueue();
     slog("Queue flushed");
+    char ts[24];
+    nowTimestamp(ts, sizeof(ts));
+    snprintf(s_lastPush, sizeof(s_lastPush), "Queued row(s) sent OK at %s", ts);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Status web page
+// ---------------------------------------------------------------------------
+// Read-only: it shows state but has no controls, so anyone on the LAN can look
+// without being able to reset or push the day.
+
+static void htmlRow(String& h, const char* label, const String& value) {
+  h += "<tr><th>";
+  h += label;
+  h += "</th><td>";
+  h += value;
+  h += "</td></tr>";
+}
+
+static void handleStatusPage() {
+  uint32_t now = millis();
+  char buf[64];
+
+  String h;
+  h.reserve(2600);
+  h += "<!doctype html><html><head><meta charset=utf-8>"
+       "<meta name=viewport content='width=device-width,initial-scale=1'>";
+  snprintf(buf, sizeof(buf), "<meta http-equiv=refresh content=%d>", STATUS_REFRESH_S);
+  h += buf;
+  h += "<title>Door counter</title><style>"
+       "body{font:16px system-ui,sans-serif;margin:0 auto;padding:16px;max-width:480px;"
+       "background:#faf9f6;color:#222}"
+       "h1{font-size:20px;margin:0 0 4px}"
+       ".ok{color:#1a7f37}.warn{color:#b35900}"
+       ".big{display:flex;gap:8px;margin:16px 0}"
+       ".big div{flex:1;background:#fff;border:1px solid #ddd;border-radius:8px;"
+       "padding:10px;text-align:center}"
+       ".big b{display:block;font-size:32px}"
+       "table{width:100%;border-collapse:collapse}"
+       "th,td{text-align:left;padding:6px 4px;border-top:1px solid #e5e5e5;"
+       "vertical-align:top}th{font-weight:500;color:#666;width:42%}"
+       "</style></head><body><h1>Station Books door counter</h1>";
+
+  if (s_counting) {
+    h += "<div class=ok>&#9679; Counting</div>";
+  } else {
+    snprintf(buf, sizeof(buf),
+             "<div class=warn>&#9679; Warming up — %lus left</div>",
+             (unsigned long)(now < s_warmupEndMs ? (s_warmupEndMs - now) / 1000 : 0));
+    h += buf;
+  }
+
+  h += "<div class=big>";
+  snprintf(buf, sizeof(buf), "<div><b>%u</b>In</div>", g_day.entries);
+  h += buf;
+  snprintf(buf, sizeof(buf), "<div><b>%u</b>Out</div>", g_day.exits);
+  h += buf;
+  snprintf(buf, sizeof(buf), "<div><b>%ld</b>Inside</div>", (long)g_day.net());
+  h += buf;
+  h += "</div><table>";
+
+  htmlRow(h, "Day", g_day.date[0] ? String(g_day.date) : String("not set yet"));
+  snprintf(buf, sizeof(buf), "%u in / %u out", g_day.amEntries, g_day.amExits);
+  htmlRow(h, "Morning", buf);
+  snprintf(buf, sizeof(buf), "%u in / %u out", g_day.pmEntries, g_day.pmExits);
+  htmlRow(h, "Afternoon", buf);
+  htmlRow(h, "Last person", s_lastEvent[0] ? String(s_lastEvent) : String("none yet"));
+  htmlRow(h, "First entry", g_day.openingTime[0] ? String(g_day.openingTime) : String("—"));
+  htmlRow(h, "Last exit", g_day.closingTime[0] ? String(g_day.closingTime) : String("—"));
+
+  htmlRow(h, "Outer sensor", s_det.outerEverFired() ? "has fired" : "<span class=warn>not fired yet</span>");
+  htmlRow(h, "Inner sensor", s_det.innerEverFired() ? "has fired" : "<span class=warn>not fired yet</span>");
+
+  snprintf(buf, sizeof(buf), "%s (signal %d)", WiFi.SSID().c_str(), WiFi.RSSI());
+  htmlRow(h, "Wi-Fi", buf);
+  nowTimestamp(buf, sizeof(buf));
+  htmlRow(h, "Clock", s_timeValid ? String(buf) : String("<span class=warn>not synced</span>"));
+
+  snprintf(buf, sizeof(buf), "%02d:%02d daily", DAILY_RESET_HOUR, DAILY_RESET_MINUTE);
+  htmlRow(h, "Sheets push", buf);
+  htmlRow(h, "Last push", s_lastPush[0] ? String(s_lastPush) : String("none since boot"));
+  htmlRow(h, "Waiting to send",
+          Storage::hasQueuedPushes() ? "<span class=warn>yes</span>" : "nothing");
+
+  uint32_t up = now / 1000;
+  snprintf(buf, sizeof(buf), "%lud %luh %lum", (unsigned long)(up / 86400),
+           (unsigned long)(up / 3600 % 24), (unsigned long)(up / 60 % 60));
+  htmlRow(h, "Up for", buf);
+
+  h += "</table></body></html>";
+  s_http.send(200, "text/html; charset=utf-8", h);
+}
+
+static void statusServerSetup() {
+  s_http.on("/", HTTP_GET, handleStatusPage);
+  s_http.onNotFound([] { s_http.send(404, "text/plain", "Not found"); });
+  s_http.begin();
 }
 
 // ---------------------------------------------------------------------------
@@ -456,13 +584,13 @@ static void maintainSensorHealth() {
   if (!s_counting) return;
   uint32_t now = millis();
   if (now - s_warmupEndMs < SENSOR_SILENCE_WARN_MS) return;
-  if (s_outerEverFired && s_innerEverFired) return;
+  if (s_det.outerEverFired() && s_det.innerEverFired()) return;
   if (now - s_lastHealthWarnMs < 60000) return;
   s_lastHealthWarnMs = now;
-  if (!s_outerEverFired)
+  if (!s_det.outerEverFired())
     slog("WARNING: PIR OUTER (GPIO %d) has not triggered — check wiring/sensor",
          PIR_OUTER_PIN);
-  if (!s_innerEverFired)
+  if (!s_det.innerEverFired())
     slog("WARNING: PIR INNER (GPIO %d) has not triggered — check wiring/sensor",
          PIR_INNER_PIN);
 }
@@ -499,6 +627,12 @@ void setup() {
   pinMode(PIR_INNER_PIN, INPUT);
   pinMode(BUTTON_PIN, INPUT);
 
+  // Detection timings come from config.h — tune them with the web tuner
+  // (web/README.md), which drives this same state machine.
+  s_det.cfg.detectionWindowMs = DETECTION_WINDOW_MS;
+  s_det.cfg.debounceMs        = DEBOUNCE_MS;
+  s_det.cfg.simultaneousMs    = SIMULTANEOUS_MS;
+
   watchdogSetup();
 
   if (!Storage::begin()) {
@@ -518,7 +652,9 @@ void setup() {
   GoogleSheets::begin();
 
   // Kick off Wi-Fi (non-blocking; counting does not wait on it).
+  WiFi.setHostname(STATUS_HOSTNAME);
   WiFi.mode(WIFI_STA);
+  statusServerSetup();
   maintainWifi();
 
   // Warm-up: PIRs are unreliable for the first 60s.
@@ -539,8 +675,7 @@ void loop() {
     s_counting = true;
     // Initialise edge-detection baseline so a sensor sitting HIGH at the end of
     // warm-up does not register as a fresh rising edge.
-    s_prevOuter = digitalRead(PIR_OUTER_PIN);
-    s_prevInner = digitalRead(PIR_INNER_PIN);
+    s_det.begin(digitalRead(PIR_OUTER_PIN), digitalRead(PIR_INNER_PIN));
     slog("Warm-up complete — counting active.");
   }
 
@@ -550,6 +685,7 @@ void loop() {
   maintainDailyReset();
   maintainQueue();
   maintainSensorHealth();
+  s_http.handleClient();
 
   delay(2);  // ~500Hz poll: fast enough to resolve 15-25cm sensor separation
 }
